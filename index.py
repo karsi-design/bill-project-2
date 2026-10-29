@@ -8,13 +8,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
 
-from flask import Flask, jsonify, request  # noqa: E402
+from flask import Flask, Response, jsonify, request  # noqa: E402
 
 import db  # noqa: E402
 import drive  # noqa: E402
 import extract  # noqa: E402
+from frontend_html import INDEX_HTML  # noqa: E402
 
 app = Flask(__name__)
+
+
+@app.route("/")
+def index():
+    return Response(INDEX_HTML, mimetype="text/html")
 
 
 @app.route("/api/bills", methods=["GET"])

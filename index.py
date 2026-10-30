@@ -1,8 +1,16 @@
 """
-All API routes for the bill system, in one Flask app. Vercel auto-detects
-a `flask` app named `app` in api/index.py and runs it as a single
-serverless function — vercel.json routes /api/* here.
+All API routes for the bill system, in one Flask app.
+
+Important: Vercel's rewrite in vercel.json replaces the path Flask sees
+with the literal destination string ("/api/index.py") -- it does NOT
+forward the original request path through PATH_INFO. So instead of
+Flask's normal @app.route per endpoint, there's one route matching what
+Vercel actually delivers, and the real intended path is read back out
+of the `vercel_path` query parameter the rewrite smuggles it through as.
+The browser side doesn't need to know any of this -- it still just
+fetches '/api/bills' etc. normally; Vercel's rewrite is transparent to it.
 """
+import re
 import sys
 from pathlib import Path
 
@@ -18,12 +26,37 @@ from frontend_html import INDEX_HTML  # noqa: E402
 app = Flask(__name__)
 
 
-@app.route("/")
-def index():
-    return Response(INDEX_HTML, mimetype="text/html")
+def logical_path() -> str:
+    return request.args.get("vercel_path", "/")
 
 
-@app.route("/api/bills", methods=["GET"])
+@app.route("/api/index.py", methods=["GET", "POST"])
+def dispatch():
+    path = logical_path()
+    method = request.method
+
+    if path == "/" and method == "GET":
+        return Response(INDEX_HTML, mimetype="text/html")
+
+    if path == "/api/bills" and method == "GET":
+        return list_bills()
+
+    m = re.fullmatch(r"/api/bills/(\d+)", path)
+    if m and method == "GET":
+        return get_bill(int(m.group(1)))
+
+    if path == "/api/upload" and method == "POST":
+        return upload()
+
+    if path == "/api/confirm" and method == "POST":
+        return confirm()
+
+    if path == "/api/init-db" and method == "POST":
+        return init_db_route()
+
+    return jsonify({"error": "not found", "path": path}), 404
+
+
 def list_bills():
     rows = db.search_bills(
         vendor=request.args.get("vendor"),
@@ -37,7 +70,6 @@ def list_bills():
     return jsonify(rows)
 
 
-@app.route("/api/bills/<int:bill_id>", methods=["GET"])
 def get_bill(bill_id):
     bill = db.get_bill(bill_id)
     if not bill:
@@ -46,7 +78,6 @@ def get_bill(bill_id):
     return jsonify(bill)
 
 
-@app.route("/api/upload", methods=["POST"])
 def upload():
     if "file" not in request.files:
         return jsonify({"error": "no file field in form data"}), 400
@@ -71,7 +102,6 @@ def upload():
     return jsonify({"id": bill_id, "review_status": "pending_review", "extracted": extracted})
 
 
-@app.route("/api/confirm", methods=["POST"])
 def confirm():
     data = request.get_json(force=True)
     if "id" not in data:
@@ -80,7 +110,6 @@ def confirm():
     return jsonify({"ok": True})
 
 
-@app.route("/api/init-db", methods=["POST"])
 def init_db_route():
     """Call this once, right after your first deploy, to create the tables. Safe to call again."""
     db.init_db()

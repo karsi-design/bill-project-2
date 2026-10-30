@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
 
 from flask import Flask, Response, jsonify, request  # noqa: E402
+from werkzeug.exceptions import HTTPException  # noqa: E402
 
 import db  # noqa: E402
 import drive  # noqa: E402
@@ -24,6 +25,19 @@ import extract  # noqa: E402
 from frontend_html import INDEX_HTML  # noqa: E402
 
 app = Flask(__name__)
+
+
+@app.errorhandler(HTTPException)
+def handle_http_exception(e):
+    return jsonify({"error": e.description, "code": e.code}), e.code
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_exception(e):
+    # Safety net: without this, an uncaught exception anywhere renders Flask's
+    # default HTML error page, which breaks the frontend's response.json() call
+    # with a confusing "Unexpected token '<'" error instead of a readable message.
+    return jsonify({"error": str(e), "type": type(e).__name__}), 500
 
 
 def logical_path() -> str:
@@ -96,9 +110,17 @@ def upload():
     except Exception as e:
         return jsonify({"error": f"drive upload failed: {e}"}), 502
 
-    bill_id = db.insert_bill(
-        extracted, drive_file_id, drive_link, f.filename, uploaded_by, page_count=n_pages
-    )
+    try:
+        bill_id = db.insert_bill(
+            extracted, drive_file_id, drive_link, f.filename, uploaded_by, page_count=n_pages
+        )
+    except Exception as e:
+        return jsonify({
+            "error": f"database save failed: {e}",
+            "hint": "Has schema_postgres.sql been run in Supabase's SQL editor yet? "
+                    "(Or POST /api/init-db once, same effect.)",
+        }), 502
+
     return jsonify({"id": bill_id, "review_status": "pending_review", "extracted": extracted})
 
 

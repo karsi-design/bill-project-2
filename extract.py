@@ -1,21 +1,18 @@
 """
-Bill field extraction via the OpenAI API, using Structured Outputs so the
-response is always valid JSON matching BILL_SCHEMA — no regex-parsing of
-free-text model output, no silently-malformed fields.
-
-Cost note: defaults to gpt-4o-mini. This is a bounded extraction task
-(read the fields off a page image), not open-ended reasoning, so the
-mini tier is the right fit — check OpenAI's current pricing page before
-running this at volume, rates change.
+Same extraction logic as the local version, adapted for serverless:
+- Takes raw bytes instead of a file path (no persistent disk to read from).
+- Rasterizes PDF pages with PyMuPDF instead of pdf2image/poppler — Vercel's
+  Python runtime doesn't have the poppler system binary installed, and
+  PyMuPDF ships its own compiled engine inside the pip package, so it
+  needs nothing extra installed on the server.
 """
 import base64
 import io
 import json
 import os
-from pathlib import Path
 
+import pymupdf as fitz  # PyMuPDF — `pymupdf` is the current import name, `fitz` is deprecated
 from openai import OpenAI
-from pdf2image import convert_from_path
 from PIL import Image
 
 DEFAULT_MODEL = "gpt-4o-mini"
@@ -126,33 +123,30 @@ def _resize_if_needed(img: Image.Image, max_dim: int = MAX_IMAGE_DIMENSION) -> I
 def _image_to_data_url(img: Image.Image) -> str:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode()
-    return f"data:image/png;base64,{b64}"
+    return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
 
 
-def _load_as_images(path: str | Path, dpi: int = 200) -> list[Image.Image]:
-    path = Path(path)
-    if path.suffix.lower() == ".pdf":
-        return [_resize_if_needed(img) for img in convert_from_path(str(path), dpi=dpi)]
-    return [_resize_if_needed(Image.open(path))]
+def _bytes_to_images(file_bytes: bytes, filename: str, dpi: int = 200) -> list[Image.Image]:
+    if filename.lower().endswith(".pdf"):
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        zoom = dpi / 72
+        matrix = fitz.Matrix(zoom, zoom)
+        images = []
+        for page in doc:
+            pix = page.get_pixmap(matrix=matrix)
+            images.append(_resize_if_needed(Image.open(io.BytesIO(pix.tobytes("png")))))
+        return images
+    return [_resize_if_needed(Image.open(io.BytesIO(file_bytes)))]
 
 
-def extract_bill(
-    file_path: str | Path,
-    model: str = DEFAULT_MODEL,
-    client: OpenAI | None = None,
-) -> tuple[dict, int]:
-    """
-    Extract structured fields from a bill file (image or PDF, any page count).
-    Returns (extracted_fields_dict, page_count). Raises on API error or on a
-    truncated/malformed response — callers should catch and route the upload
-    to the review queue as a failed-extraction case rather than losing it.
-    """
-    client = client or OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    images = _load_as_images(file_path)
+def extract_bill(file_bytes: bytes, filename: str, model: str = DEFAULT_MODEL) -> tuple[dict, int]:
+    """Returns (extracted_fields_dict, page_count)."""
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    images = _bytes_to_images(file_bytes, filename)
 
-    content = [{"type": "text", "text": "Extract this bill's data. It has "
-                                         f"{len(images)} page(s), shown below in order."}]
+    content = [
+        {"type": "text", "text": f"Extract this bill's data. It has {len(images)} page(s), shown below in order."}
+    ]
     for img in images:
         content.append({"type": "image_url", "image_url": {"url": _image_to_data_url(img)}})
 
